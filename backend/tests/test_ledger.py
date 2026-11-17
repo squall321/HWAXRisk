@@ -154,7 +154,7 @@ def test_mcp_tools_take_the_same_gates_and_page_within_the_wire(ledger_box):
                 rows={"R-001": {"비고": "x"}})["error"] == "role_insufficient"
     assert call("risk_ledger_overview", target_key=ledger_box.target_key)["latest_version"] == 2
     ledger_box.act_as(STRANGER)
-    assert call("risk_ledger_overview", target_key=ledger_box.target_key)["error"] == "not_visible"
+    assert call("risk_ledger_overview", target_key=ledger_box.target_key)["error"] == "E404"        # 구성원만 — REST 와 같은 거절
     ledger_box.act_as(EDITOR)
     out = call("risk_ledger_build", target_key=ledger_box.target_key, base_version=2,
                layers=[{"name": "MCP 층", "order": 70, "rows": {code: {"비고": "가" * 3000} for code in CODES}}])
@@ -194,10 +194,97 @@ def test_purge_blanks_the_ledger_text_but_keeps_the_heads(ledger_box):
     assert {r["body_json"] for r in store.query("SELECT body_json FROM rr_ledger_templates")} == {"{}"}
     assert {r["source_file"] for r in store.query("SELECT source_file FROM rr_ledger_layers")} == {None}
     assert store.query_one("SELECT rows_n FROM rr_ledger_versions WHERE version = 2")["rows_n"] == 13
-    # 회수된 과제의 대상에는 더 쓰지 않는다(읽기는 그대로 — 비운 글이다).
+    assert store.query_one("SELECT notice FROM rr_ledger_versions WHERE version = 2")["notice"] == "[purged]"
+    # 회수된 과제의 대상은 쓰지도 읽지도 않는다 — 비운 틀을 읽다 500 이 나지 않고 같은 409 다(반대 검토 L2).
+    owner, viewer = factories.ident(OWNER), factories.ident(VIEWER)
     code, status = _refused(ledger_routes.post_layer, ledger_box.target_key,
-                            ledger_routes.LayerBody(name="회수 뒤 층", order=99, rows={"R-001": {"비고": "x"}}), ident=factories.ident(OWNER))
+                            ledger_routes.LayerBody(name="회수 뒤 층", order=99, rows={"R-001": {"비고": "x"}}), ident=owner)
     assert (code, status) == ("project_purged", 409)
+    for read in (lambda: ledger_routes.get_ledger(ledger_box.target_key, ident=viewer),
+                 lambda: ledger_routes.get_version_diff(ledger_box.target_key, 2, ident=viewer),
+                 lambda: ledger_routes.get_version_export(ledger_box.target_key, 2, fmt="csv", ident=viewer),
+                 lambda: ledger_routes.get_report_bundle(ledger_box.target_key, 2, ident=viewer),
+                 lambda: ledger_routes.post_numbers_check(ledger_box.target_key, ledger_routes.NumbersCheckBody(text="1"), ident=viewer)):
+        assert _refused(read) == ("project_purged", 409)
+    ledger_box.act_as(VIEWER)
+    for tool, args in (("risk_ledger_overview", {}), ("risk_ledger_diff", {"version": 2}), ("risk_ledger_export", {"version": 2}),
+                       ("risk_numbers_check", {"text": "1"}), ("risk_export_report_bundle", {})):
+        assert call(tool, target_key=ledger_box.target_key, **args)["error"] == "project_purged", tool
+
+
+def test_purge_blanks_the_number_ledger_keys_and_the_bundle(ledger_box):
+    seed_ledger(ledger_box)
+    owner = factories.ident(OWNER)
+    ledger_routes.put_numbers(ledger_box.target_key, ledger_routes.NumbersBody(
+        numbers=[{"name": "합성 응력", "value": 412.5, "unit": "MPa", "revision": "r2", "metric_key": "MET-SYN"}],
+        forbidden=[{"code": "R-001", "value": 9.9, "unit": "mm", "reason": "합성 금지"}]), ident=owner)
+    bundle = ledger_routes.post_evidence_bundle(ledger_box.target_key, ledger_routes.BundleBody(
+        template={"name": "틀", "caps": {"부품": 2000}, "total_cap": 2000}), ident=owner)["bundle_id"]
+    routes.purge_project(ledger_box.project_id, routes.PurgeBody(code="LEDGER-1", reason="시험 회수"), ident=owner)
+    store = ledger_box.store
+    number = dict(store.query_one("SELECT name, revision, value_text, unit, metric_key FROM rr_ledger_numbers"))
+    assert number["name"].startswith("[purged:") and number == {**number, "revision": "", "value_text": "0", "unit": None, "metric_key": None}
+    ban = dict(store.query_one("SELECT code, value_text, unit, reason FROM rr_ledger_forbidden"))
+    assert ban["value_text"].startswith("[purged:") and (ban["unit"], ban["reason"]) == (None, "[purged]")
+    assert _refused(ledger_routes.get_evidence_bundle, bundle, ident=factories.ident(VIEWER)) == ("project_purged", 409)
+
+
+def test_the_csv_export_guards_formula_cells_unless_raw_is_asked(ledger_box):
+    """반대 검토 L1 — 스프레드시트가 수식으로 읽는 글 칸(=, +, @, - 뒤 글)을 ' 로 막고 그 수를 말한다. 수 글(-0.3)은 그대로, raw=true 면 원장 그대로다."""
+    seed_ledger(ledger_box)
+    owner = factories.ident(OWNER)
+    ledger_routes.post_version(ledger_box.target_key, ledger_routes.BuildBody(base_version=2, layers=[{"name": "수식", "order": 60, "rows": {
+        "R-001": {"비고": "=HYPERLINK(\"x\")"}, "R-002": {"비고": "+1+1"}, "R-003": {"비고": "@SUM(A1)"}, "R-004": {"비고": "-0.3"},
+        "R-005": {"비고": "-PART"}}}]), ident=owner)
+    guarded = ledger_routes.get_version_export(ledger_box.target_key, 3, fmt="csv", ident=owner)
+    rows = {line[0]: line for line in csv.reader(io.StringIO(guarded.body.decode("utf-8")))}
+    assert guarded.headers["X-Formula-Guarded"] == "4"
+    assert [rows[c][8] for c in ("R-001", "R-002", "R-003", "R-004", "R-005")] == [
+        "'=HYPERLINK(\"x\")", "'+1+1", "'@SUM(A1)", "-0.3", "'-PART"]
+    raw = ledger_routes.get_version_export(ledger_box.target_key, 3, fmt="csv", raw=True, ident=owner)
+    assert raw.headers["X-Formula-Guarded"] == "0" and "\n" + "R-001" in raw.body.decode("utf-8")
+    assert {line[0]: line for line in csv.reader(io.StringIO(raw.body.decode("utf-8")))}["R-001"][8] == "=HYPERLINK(\"x\")"
+    ledger_box.act_as(OWNER)
+    page = call("risk_ledger_export", target_key=ledger_box.target_key, version=3, fmt="csv")
+    assert page["formula_guarded"] == 4 and page["raw"] is False
+
+
+def test_org_public_projects_do_not_open_the_ledger_to_non_members_over_mcp(ledger_box):
+    """사용자 결정(11-17) — 판정표 · 묶음 · 숫자 · 보고 묶음의 MCP 읽기는 구성원만이다(REST 와 같은 문 · 같은 404). 조직 공개 과제라도 열리지 않는다 —
+    기존 읽기 도구(등록부)는 그대로 조직 공개로 연다."""
+    seed_ledger(ledger_box)
+    owner = factories.ident(OWNER)
+    bundle = ledger_routes.post_evidence_bundle(ledger_box.target_key, ledger_routes.BundleBody(
+        template={"name": "틀", "caps": {"부품": 2000}, "total_cap": 2000}), ident=owner)["bundle_id"]
+    ledger_routes.put_template(ledger_box.target_key, "facts", {"keys": [{"key": "id", "from": "@code"}]}, ident=owner)
+    ledger_box.store.execute("UPDATE rr_projects SET mcp_visibility = 'org' WHERE id = ?", (ledger_box.project_id,))
+    rest = _refused(ledger_routes.get_ledger, ledger_box.target_key, ident=factories.ident(STRANGER))
+    ledger_box.act_as(STRANGER)
+    assert "error" not in call("risk_get_registry", target_key=ledger_box.target_key)          # 기존 도구는 조직 공개로 연다
+    for tool, args in (("risk_ledger_overview", {"target_key": ledger_box.target_key}),
+                       ("risk_ledger_diff", {"target_key": ledger_box.target_key, "version": 2}),
+                       ("risk_ledger_export", {"target_key": ledger_box.target_key}),
+                       ("risk_numbers_check", {"target_key": ledger_box.target_key, "text": "1"}),
+                       ("risk_export_report_bundle", {"target_key": ledger_box.target_key}),
+                       ("risk_get_evidence_bundle", {"bundle_id": bundle})):
+        got = call(tool, **args)
+        assert got.get("error") == rest[0] == "E404", (tool, got)
+    ledger_box.act_as(VIEWER)
+    assert call("risk_ledger_overview", target_key=ledger_box.target_key)["latest_version"] == 2
+
+
+def test_mcp_summary_lists_are_capped_with_their_totals(ledger_box):
+    """반대 검토 M5 — 쪽으로 나누지 않는 요약 목록(든 · 빠진 · 등급 바뀐 코드)이 쪽마다 되풀이되어 와이어를 넘을 수 있었다 — 앞 200개와 <칸>_total."""
+    seed_ledger(ledger_box)
+    owner = factories.ident(OWNER)
+    ledger_routes.post_version(ledger_box.target_key, ledger_routes.BuildBody(base_version=2, layers=[{"name": "많은 새 코드", "order": 60,
+        "rows": {f"N-{i:04d}": {"비고": "새 행"} for i in range(1, 451)}}]), ident=owner)
+    ledger_box.act_as(VIEWER)
+    out = call("risk_ledger_diff", target_key=ledger_box.target_key, version=3)
+    assert len(out["codes_added"]) == 200 and out["codes_added_total"] == 450
+    from app import mcp_server as srv
+
+    assert srv._wire_chars(out) <= srv.MCP_RESULT_CHARS
 
 
 V8_TABLES = ("rr_ledger_templates", "rr_ledger_layers", "rr_ledger_versions", "rr_ledger_rows", "rr_ledger_cells", "rr_evidence_bundles",

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Annotated, Any
 
 import anyio
@@ -514,7 +514,7 @@ def risk_get_snapshot(snapshot_id: Annotated[str, Field(description=_A_SNAPSHOT_
 
     def call(key: str, *, owner_sub: str) -> dict:
         out = routes.snapshot_part(key, part, owner_sub=owner_sub, limit=limit, offset=offset)
-        return {**out, "provenance": ledger_routes.snapshot_provenance(key)}
+        return _fit_provenance({**out, "provenance": ledger_routes.snapshot_provenance(key)})
 
     return _scoped("snapshot", snapshot_id, call, snapshot_id)
 
@@ -1074,9 +1074,9 @@ async def risk_locate_for_section(project_id: Annotated[str, Field(description=_
                                   odb_job_id: Annotated[str | None, Field(description=_A_LOC_ODB)] = None,
                                   stepforge_project_id: Annotated[str | None, Field(description=_A_LOC_CAD)] = None) -> dict:
     """단면 자리 찾기(읽기 전용) — 리스크 항목(finding_id 또는 target_key+cluster_key) · refdes · net · 보드 좌표(x+y, side 선택) 가운데 하나를 받아 MCAD 점(mcad {x, y, z, unit mm}) · 그 자리의 CAD 몸체(body.path, 확신할 때만) · 단면 둘(planes — 긴 축 평면 먼저, 항목마다 {axis, offset, unit mm} 이고 axis 는 평면 법선) · window_mm · 평면마다 F1 section_pair_view 에 그대로 부를 인자 f1.calls(점 [x, y, z] 목록 · axis · window_mm · 몸체는 highlight — projects 에 견줄 다른 판을 더해 2 ~ 6개, offset 은 넘기지 않는다)와 변환 근거(transform — 식 · 상태 · 오차) · 원천 출처 표지(provenance — risk_get_provenance 꼴)를 준다, 자리를 못 정하면 status unknown 과 reason{code, message, fix}(변환 미등록 transform_missing 이면 risk_propose_board_transform → risk_set_board_transform), 보드 · CAD 과제는 비우면 과제의 원천이고 ODB 허브는 위임으로 확인된 신원의 PAT 로만 부른다(없으면 locate_pat_absent)."""
-    return await _entry(entry.locate_for_section, project_id=project_id, finding_id=finding_id, target_key=target_key,
-                        cluster_key=cluster_key, refdes=refdes, net=net, x=x, y=y, side=side, odb_job_id=odb_job_id,
-                        stepforge_project_id=stepforge_project_id)
+    return _fit_provenance(await _entry(entry.locate_for_section, project_id=project_id, finding_id=finding_id, target_key=target_key,
+                                        cluster_key=cluster_key, refdes=refdes, net=net, x=x, y=y, side=side, odb_job_id=odb_job_id,
+                                        stepforge_project_id=stepforge_project_id))
 
 
 @mcp.tool()
@@ -1143,16 +1143,74 @@ _A_BUILD_COLSET = "칸 정의 판 번호 — 비우면 가장 새 칸 정의다.
 _A_DIFF_BASE = "견줄 판 번호 — 비우면 그 판의 기준 판이다."
 _A_EXPORT_FMT = f"내보낼 꼴 — {' · '.join(ledger_module.EXPORT_FORMATS)}(csv 는 첫 줄이 보안 문구이고 둘째 줄이 칸 머리다)."
 _A_LEDGER_OFFSET = f"건너뛸 행 수(0부터) — 앞 응답의 next_offset 을 준다. 한 쪽은 MCP 결과 상한({MCP_RESULT_CHARS:,}자) 안이다."
+_A_EXPORT_RAW = ("참이면 csv 글 칸을 원장 그대로 낸다(원본 판정표와 바이트까지 견줄 때만 — 수식으로 읽힐 칸을 막지 않는다). 거짓(기본)이면 =, +, @ 로 "
+                 "시작하거나 - 뒤가 수가 아닌 글 칸 앞에 ' 를 붙인다. json 에는 쓰지 않는다.")
 
 
 def _actor() -> str:
     return str(_caller().get("email") or "service")
 
 
+# 판정표 · 묶음 읽기는 그 대상의 구성원만이다(사용자 결정 11-17 — REST 와 같은 문 · 같은 거절, mcp_scope_owner 의 조직 공개로 넓히지 않는다). 신원이
+# 없으면 REST 와 같은 401 unauthorized, 구성원이 아니면 REST 와 같은 404 다. 본체는 스레드에서 돈다(반대 검토 L3 — 표 전부를 읽는 읽기가 이벤트
+# 루프를 붙들지 않게). 요청 객체만 루프에서 집는다(_entry 와 같다).
+LIST_CAP = 200
+
+
+async def _member_read(fn: Callable[[str, str, str], dict], target_key: str | None = None, *, bundle_id: str | None = None) -> dict:
+    request = _request()
+
+    def call() -> dict:
+        caller = routes.mcp_caller(request)
+        if caller.get("kind") != "user" or not caller.get("email"):
+            raise AppError("unauthorized", "인증된 사용자만 호출할 수 있습니다 — 판정표 · 묶음은 그 대상의 구성원만 읽는다(조직 공개로 열리지 않는다).", 401)
+        key = target_key
+        if bundle_id is not None:
+            key = ledger_routes.bundle_target(bundle_id)
+            if key is None:
+                raise ledger_routes._bundle_missing(bundle_id)
+        return fn(str(key), routes._target_reader(str(key), caller["email"]), caller["email"])
+
+    call.__name__ = getattr(fn, "__name__", "member_read")
+    return await anyio.to_thread.run_sync(lambda: _guarded(call))
+
+
+def _cap_lists(out: dict, keys: Sequence[str], cap: int = LIST_CAP) -> dict:
+    """쪽마다 되풀이되는 요약 목록(쪽으로 나누지 않는 칸)을 앞 `cap` 개로 줄이고 원래 수를 <칸>_total 에 적는다 — 와이어가 그래도 모자라면 반씩 더
+    줄인다(반대 검토 M5). 전부는 REST 답이다."""
+    totals = {k: len(out.get(k) or []) for k in keys if isinstance(out.get(k), list)}
+    keep = {k: min(n, cap) for k, n in totals.items()}
+
+    def shaped() -> dict:
+        got = dict(out)
+        for k, n in keep.items():
+            got[k] = out[k][:n]
+            if n < totals[k]:
+                got[f"{k}_total"] = totals[k]
+        return got
+
+    got = shaped()
+    while _wire_chars(got) > MCP_RESULT_CHARS and any(n > 0 for n in keep.values()):
+        k = max(keep, key=keep.get)
+        keep[k] //= 2
+        got = shaped()
+    return got
+
+
+def _cite_brief(cite: Any) -> Any:
+    """쪽 답의 인용 형식 — scope.codes 를 그 수로 줄인다(전부는 쪽 없는 답 · REST)."""
+    if not isinstance(cite, dict) or not isinstance((cite.get("scope") or {}).get("codes"), list):
+        return cite
+    scope = dict(cite["scope"])
+    scope["codes_n"] = len(scope.pop("codes"))
+    return {**cite, "scope": scope}
+
+
 @mcp.tool()
-def risk_ledger_overview(target_key: Annotated[str, Field(description=_A_TARGET_KEY)]) -> dict:
-    """판정표 원장 한눈(읽기 전용) — 틀 종류별 판(columns · facts · decision_map) · 판정표 판 목록(기준 판 · 칸 정의 판 · 행 수 · 등급 바뀐 코드 수) · 판에 아직 쓰지 않은 층(used false) · 근거 묶음 · 숫자 원장 수 · 최근 내보내기를 준다, 판정표 도구의 시작이다(칸 정의가 없으면 risk_ledger_put_template(kind='columns') 부터)."""
-    return _scoped("target", target_key, ledger_routes.overview_payload, target_key)
+async def risk_ledger_overview(target_key: Annotated[str, Field(description=_A_TARGET_KEY)]) -> dict:
+    """판정표 원장 한눈(읽기 전용) — 틀 종류별 판(columns · facts · decision_map) · 판정표 판 목록(기준 판 · 칸 정의 판 · 행 수 · 등급 바뀐 코드 수) · 판에 아직 쓰지 않은 층(used false) · 근거 묶음 · 숫자 원장 수 · 최근 내보내기를 준다(목록은 앞 200개와 <칸>_total — 전부는 REST), 판정표 도구의 시작이다(칸 정의가 없으면 risk_ledger_put_template(kind='columns') 부터), 그 대상의 구성원만 읽는다(조직 공개로 열리지 않는다)."""
+    return await _member_read(lambda key, owner, _email: _cap_lists(ledger_routes.overview_payload(key, owner_sub=owner),
+                                                                    ("layers", "bundles", "versions")), target_key)
 
 
 @mcp.tool()
@@ -1184,13 +1242,14 @@ async def risk_ledger_build(target_key: Annotated[str, Field(description=_A_TARG
 
 
 @mcp.tool()
-def risk_ledger_diff(target_key: Annotated[str, Field(description=_A_TARGET_KEY)],
-                     version: Annotated[int, Field(description=_A_LEDGER_VERSION)],
-                     base: Annotated[int | None, Field(description=_A_DIFF_BASE)] = None,
-                     offset: Annotated[int, Field(description=_A_LEDGER_OFFSET)] = 0) -> dict:
-    """판정표 두 판 비교(읽기 전용) — 바뀐 칸(code · column · before · after — 칸 정의 차례 · 코드 차례) · 든 · 빠진 코드 · 바뀐 코드 수 · 바뀐 칸 수 · 등급 칸과 등급이 바뀐 코드 수(두 판에 다 있는 코드만)를 준다, 수는 늘 전부이고 changes 는 와이어 상한 안에서 쪽으로 주어 남으면 next_offset 을 offset 으로 주고 이어 받는다(자르지 않는다), 빈 칸(null · 빈 글)은 서로 같다."""
-    def call(key: str, *, owner_sub: str) -> dict:
-        full = ledger_routes.diff_payload(key, version, base, owner_sub=owner_sub)
+async def risk_ledger_diff(target_key: Annotated[str, Field(description=_A_TARGET_KEY)],
+                           version: Annotated[int, Field(description=_A_LEDGER_VERSION)],
+                           base: Annotated[int | None, Field(description=_A_DIFF_BASE)] = None,
+                           offset: Annotated[int, Field(description=_A_LEDGER_OFFSET)] = 0) -> dict:
+    """판정표 두 판 비교(읽기 전용) — 바뀐 칸(code · column · before · after — 칸 정의 차례 · 코드 차례) · 든 · 빠진 코드 · 바뀐 코드 수 · 바뀐 칸 수 · 등급 칸과 등급이 바뀐 코드 수(두 판에 다 있는 코드만)를 준다, 수는 늘 전부이고 changes 는 와이어 상한 안에서 쪽으로 주어 남으면 next_offset 을 offset 으로 주고 이어 받는다(자르지 않는다 — 든 · 빠진 · 등급 바뀐 코드 목록은 쪽마다 앞 200개와 <칸>_total, 전부는 REST), 빈 칸(null · 빈 글)은 서로 같다, 그 대상의 구성원만 읽는다."""
+    def call(key: str, owner_sub: str, _email: str) -> dict:
+        full = _cap_lists(ledger_routes.diff_payload(key, version, base, owner_sub=owner_sub),
+                          ("codes_added", "codes_removed", "grade_changed_codes"))
         start = max(0, int(offset or 0))
 
         def page(take: int) -> dict:
@@ -1202,24 +1261,25 @@ def risk_ledger_diff(target_key: Annotated[str, Field(description=_A_TARGET_KEY)
 
         return _fit_list(page, max(1, len(full["changes"]) - start), lambda out: len(out["changes"]))
 
-    return _scoped("target", target_key, call, target_key)
+    return await _member_read(call, target_key)
 
 
 @mcp.tool()
-def risk_ledger_export(target_key: Annotated[str, Field(description=_A_TARGET_KEY)],
-                       version: Annotated[int | None, Field(description=_A_LEDGER_VERSION_OPT)] = None,
-                       fmt: Annotated[str, Field(description=_A_EXPORT_FMT)] = "json",
-                       offset: Annotated[int, Field(description=_A_LEDGER_OFFSET)] = 0) -> dict:
-    """판정표 판 내보내기(읽기 · 기록 한 줄) — csv(text 의 첫 줄이 보안 문구 · 둘째 줄이 칸 머리 · 이어 코드 차례의 행) 또는 json(table 의 첫 칸 notice · columns · rows)이고 값은 원장 그대로다(표기 규칙을 입히지 않는다), 행은 와이어 상한 안에서 쪽으로 주어 남으면 next_offset 을 offset 으로 주고 이어 받는다(쪽마다 보안 문구 · 칸 머리가 앞에 선다), 누가 어느 판을 냈는지 내보내기 기록(export_id)이 남는다."""
-    actor = _actor()
-
-    def call(key: str, *, owner_sub: str) -> dict:
-        total = ledger_routes.export_page(key, version, fmt, owner_sub=owner_sub, offset=offset, limit=1)["rows_n"]
-        out = _fit_list(lambda take: ledger_routes.export_page(key, version, fmt, owner_sub=owner_sub, offset=offset, limit=take),
-                        max(1, total - max(0, int(offset or 0))), lambda page: page["page_rows"])
+async def risk_ledger_export(target_key: Annotated[str, Field(description=_A_TARGET_KEY)],
+                             version: Annotated[int | None, Field(description=_A_LEDGER_VERSION_OPT)] = None,
+                             fmt: Annotated[str, Field(description=_A_EXPORT_FMT)] = "json",
+                             offset: Annotated[int, Field(description=_A_LEDGER_OFFSET)] = 0,
+                             raw: Annotated[StrictBool, Field(description=_A_EXPORT_RAW)] = False) -> dict:
+    """판정표 판 내보내기(읽기 · 기록 한 줄) — csv(text 의 첫 줄이 보안 문구 · 둘째 줄이 칸 머리 · 이어 코드 차례의 행) 또는 json(table 의 첫 칸 notice · columns · rows)이고 값은 원장 그대로다(표기 규칙을 입히지 않는다 — csv 는 수식으로 읽힐 글 칸 앞에 ' 를 붙이고 그 수를 formula_guarded 에 적는다, raw=true 면 붙이지 않는다), 행은 와이어 상한 안에서 쪽으로 주어 남으면 next_offset 을 offset 으로 주고 이어 받는다(쪽마다 보안 문구 · 칸 머리가 앞에 선다), 누가 어느 판을 냈는지 내보내기 기록(export_id)이 남는다, 그 대상의 구성원만 읽는다."""
+    def call(key: str, owner_sub: str, actor: str) -> dict:
+        table = ledger_routes.export_table_for(key, version, owner_sub=owner_sub)       # 표는 한 번만 읽는다(쪽을 재는 동안 다시 읽지 않는다 — L3)
+        start = max(0, int(offset or 0))
+        out = _fit_list(lambda take: ledger_routes.export_page(key, version, fmt, owner_sub=owner_sub, offset=start, limit=take,
+                                                               table=table, raw=raw),
+                        max(1, len(table["rows"]) - start), lambda page: page["page_rows"])
         return ledger_routes.note_page(out, owner_sub=owner_sub, actor=actor)
 
-    return _scoped("target", target_key, call, target_key)
+    return await _member_read(call, target_key)
 
 
 # ================================================================ 근거 묶음(RK-02 — contracts §1)
@@ -1245,16 +1305,10 @@ async def risk_build_evidence_bundle(target_key: Annotated[str, Field(descriptio
 
 
 @mcp.tool()
-def risk_get_evidence_bundle(bundle_id: Annotated[str, Field(description=_A_BUNDLE_ID)],
-                             offset: Annotated[int | None, Field(description=_A_BUNDLE_OFFSET)] = None) -> dict:
-    """근거 묶음 받기(읽기 전용) — {bundle_id, target_key, version, fingerprint, cite, evidence} 이고 evidence 를 고치지 않고 deliberate_start(evidence=…) 에 넣는다(지문은 sha256(json.dumps(evidence, ensure_ascii=False, sort_keys=True, separators=(",", ":"))) — 받는 쪽이 다시 재어 같은지 본다), 묶음이 커서 Claude 에서 직접 읽으면 offset 으로 쪽을 받는다(그때는 그 쪽의 항목만이라 지문을 다시 재지 않는다), 그 대상을 볼 수 있는 사람만 연다(범위 밖 · 없는 묶음은 not_visible)."""
-    def call() -> dict:
-        target_key = ledger_routes.bundle_target(bundle_id) or bundle_id
-        try:
-            owner_sub = routes.mcp_scope_owner("target", target_key, _caller())
-        except AppError as exc:
-            # 묶음 id 로 부른 사람에게 그 묶음의 대상 열쇠를 흘리지 않는다 — 없는 묶음과 같은 글이다.
-            raise AppError(exc.code, f"볼 수 없는 id 입니다 — {bundle_id}.", exc.http_status) from None
+async def risk_get_evidence_bundle(bundle_id: Annotated[str, Field(description=_A_BUNDLE_ID)],
+                                   offset: Annotated[int | None, Field(description=_A_BUNDLE_OFFSET)] = None) -> dict:
+    """근거 묶음 받기(읽기 전용) — {bundle_id, target_key, version, fingerprint, cite, evidence} 이고 evidence 를 고치지 않고 deliberate_start(evidence=…) 에 넣는다(지문은 sha256(json.dumps(evidence, ensure_ascii=False, sort_keys=True, separators=(",", ":"))) — 받는 쪽이 다시 재어 같은지 본다), 묶음의 개인정보는 이 앱이 이미 가렸다(늘 가린다), 묶음이 커서 Claude 에서 직접 읽으면 offset 으로 쪽을 받는다(그때는 그 쪽의 항목만이라 지문을 다시 재지 않고 cite.scope 의 코드는 수만 싣는다), 그 대상의 구성원만 연다(REST 와 같은 문 — 조직 공개로 열리지 않고, 남 · 없는 묶음은 같은 404)."""
+    def call(_key: str, owner_sub: str, _email: str) -> dict:
         full = ledger_routes.bundle_payload(bundle_id, owner_sub=owner_sub)
         if offset is None:
             return full
@@ -1263,14 +1317,14 @@ def risk_get_evidence_bundle(bundle_id: Annotated[str, Field(description=_A_BUND
 
         def page(take: int) -> dict:
             rows = items[start:start + take]
-            out = {**full, "evidence": rows, "offset": start, "items_n": len(items), "paged": True}
+            out = {**full, "cite": _cite_brief(full.get("cite")), "evidence": rows, "offset": start, "items_n": len(items), "paged": True}
             if start + len(rows) < len(items):
                 out["next_offset"] = start + len(rows)
             return out
 
         return _fit_list(page, max(1, len(items) - start), lambda out: len(out["evidence"]))
 
-    return _guarded(call)
+    return await _member_read(call, bundle_id=bundle_id)
 
 
 # ================================================================ 원천의 출처 표지(RK-06)
@@ -1333,16 +1387,16 @@ async def risk_numbers_put(target_key: Annotated[str, Field(description=_A_TARGE
 
 
 @mcp.tool()
-def risk_numbers_check(target_key: Annotated[str, Field(description=_A_TARGET_KEY)],
-                       text: Annotated[str | None, Field(description=_A_CHECK_TEXT)] = None,
-                       bundle_id: Annotated[str | None, Field(description=_A_CHECK_BUNDLE)] = None,
-                       code: Annotated[str | None, Field(description=_A_CHECK_CODE)] = None) -> dict:
-    """글 · 근거 묶음의 수 점검(읽기 전용 — 쓰지 않는다) — 숫자 원장과 대조해 원장에 없는 수(not_in_ledger — 작은 정수까지 센다) · 금지값 쓰임(forbidden — 코드 '*' 는 어디서나, 아니면 그 코드의 줄에서) · 단위 불일치(unit_mismatch — 같은 값에 다른 단위) · 원장에 없는 id 꼴(unknown_ids — 원장 코드 · 지표 키와 같은 머리인데 없는 R-… · MET-…)의 수(counts)와 위치(where · col · 앞뒤 글, 목록마다 앞 500개 — 와이어가 모자라면 더 줄이고 shown_per_list 에 적는다)를 준다, 코드 · 키 꼴 낱말 속 숫자는 수로 세지 않는다."""
-    def call(key: str, *, owner_sub: str) -> dict:
+async def risk_numbers_check(target_key: Annotated[str, Field(description=_A_TARGET_KEY)],
+                             text: Annotated[str | None, Field(description=_A_CHECK_TEXT)] = None,
+                             bundle_id: Annotated[str | None, Field(description=_A_CHECK_BUNDLE)] = None,
+                             code: Annotated[str | None, Field(description=_A_CHECK_CODE)] = None) -> dict:
+    """글 · 근거 묶음의 수 점검(읽기 전용 — 쓰지 않는다) — 숫자 원장과 대조해 원장에 없는 수(not_in_ledger — 작은 정수까지 센다) · 금지값 쓰임(forbidden — 코드 '*' 는 어디서나, 아니면 그 코드의 줄에서) · 단위 불일치(unit_mismatch — 같은 값에 다른 단위) · 원장에 없는 id 꼴(unknown_ids — 원장 코드 · 지표 키와 같은 머리인데 없는 R-… · MET-…)의 수(counts)와 위치(where · col · 앞뒤 글, 목록마다 앞 500개 — 와이어가 모자라면 더 줄이고 shown_per_list 에 적는다)를 준다, 코드 · 키 꼴 낱말 속 숫자는 수로 세지 않는다, 그 대상의 구성원만 부른다."""
+    def call(key: str, owner_sub: str, _email: str) -> dict:
         body = entry._body(ledger_routes.NumbersCheckBody, text=text, bundle_id=bundle_id, code=code)
         return _fit_findings(ledger_routes.numbers_check_payload(key, body, owner_sub=owner_sub))
 
-    return _scoped("target", target_key, call, target_key)
+    return await _member_read(call, target_key)
 
 
 _CHECK_LISTS = ("not_in_ledger", "forbidden", "unit_mismatch", "unknown_ids")
@@ -1364,25 +1418,29 @@ _A_RB_OFFSET = f"건너뛸 코드 수(0부터) — 앞 응답의 next_offset 을
 
 
 @mcp.tool()
-def risk_export_report_bundle(target_key: Annotated[str, Field(description=_A_TARGET_KEY)],
-                              version: Annotated[int | None, Field(description=_A_LEDGER_VERSION_OPT)] = None,
-                              template_version: Annotated[int | None, Field(description=_A_FACTS_VERSION)] = None,
-                              offset: Annotated[int, Field(description=_A_RB_OFFSET)] = 0) -> dict:
-    """판정표 판 → 보고 묶음(읽기 · 기록 한 줄) — 첫 칸 notice(보안 문구) · report_bundle_id(rb_ 머리 — 같은 판 · 같은 틀이면 같은 id) · 인용 형식 cite(source_kind risk_report_bundle) · 코드마다 facts(등록된 facts 틀의 키 전부 — 값이 없으면 null 이고 null_reasons 에 까닭) · 그림 참조(figures) · 그 코드를 덮은 층(sources — 판 · 층 · 원천 파일) · 숫자 원장 참조(numbers)와 표기 규칙 검사(label_check — 단독 대문자 A ~ J 수)를 준다, facts 는 와이어 상한 안에서 쪽으로 주어 남으면 next_offset 을 offset 으로 주고 이어 받는다(머리 · 수 · 지문은 쪽마다 같다), 그리기는 ReportArchive 몫이다."""
-    actor = _actor()
-
-    def call(key: str, *, owner_sub: str) -> dict:
+async def risk_export_report_bundle(target_key: Annotated[str, Field(description=_A_TARGET_KEY)],
+                                    version: Annotated[int | None, Field(description=_A_LEDGER_VERSION_OPT)] = None,
+                                    template_version: Annotated[int | None, Field(description=_A_FACTS_VERSION)] = None,
+                                    offset: Annotated[int, Field(description=_A_RB_OFFSET)] = 0) -> dict:
+    """판정표 판 → 보고 묶음(읽기 · 기록 한 줄) — 첫 칸 notice(보안 문구) · report_bundle_id(rb_ 머리 — 같은 판 · 같은 틀이면 같은 id) · 인용 형식 cite(source_kind risk_report_bundle) · 코드마다 facts(등록된 facts 틀의 키 전부 — 값이 없으면 null 이고 null_reasons 에 까닭) · 그림 참조(figures) · 그 코드를 덮은 층(sources — 판 · 층 · 원천 파일) · 숫자 원장 참조(numbers)와 표기 규칙 검사(label_check — 단독 대문자 A ~ J 수)를 준다, facts 는 와이어 상한 안에서 쪽으로 주어 남으면 next_offset 을 offset 으로 주고 이어 받는다(머리 · 수 · 지문은 쪽마다 같다), 쪽 답의 그림은 그 쪽 코드의 것 · 출처 층 · 숫자 참조는 첫 쪽에만 · cite.scope 의 코드는 수만이다(전부는 REST), 그리기는 ReportArchive 몫이다, 그 대상의 구성원만 읽는다."""
+    def call(key: str, owner_sub: str, actor: str) -> dict:
         full = ledger_routes.report_bundle_payload(key, version, template_version, owner_sub=owner_sub)
         start = max(0, int(offset or 0))
 
         def page(take: int) -> dict:
             rows = full["facts"][start:start + take]
-            out = {**full, "facts": rows, "offset": start}
+            codes = {r["code"] for r in rows}
+            # 쪽마다 그 쪽 코드의 그림만 · 출처 층 · 숫자 참조는 첫 쪽에만(뒤 쪽은 수만) · 인용 형식의 코드는 수만(반대 검토 M5).
+            out = {**full, "facts": rows, "offset": start, "cite": _cite_brief(full["cite"]),
+                   "figures": [f for f in full["figures"] if f["code"] in codes],
+                   "sources": full["sources"] if start == 0 else [], "numbers": full["numbers"] if start == 0 else []}
+            if start:
+                out["sources_total"], out["numbers_total"] = len(full["sources"]), len(full["numbers"])
             if start + len(rows) < len(full["facts"]):
                 out["next_offset"] = start + len(rows)
-            return out
+            return _cap_lists(out, ("figures", "sources", "numbers"))
 
         out = _fit_list(page, max(1, len(full["facts"]) - start), lambda got: len(got["facts"]))
         return ledger_routes.note_report_bundle(out, owner_sub=owner_sub, actor=actor)
 
-    return _scoped("target", target_key, call, target_key)
+    return await _member_read(call, target_key)

@@ -142,22 +142,22 @@ CALLS = [
     ("risk_propose_board_transform", {"project_id": "p1"}, "delegation_required"),
     ("risk_set_board_transform", {"project_id": "p1", "remove": True}, "delegation_required"),
     ("risk_set_item_location", {"project_id": "p1", "part": None, "point": None, "finding_id": "f1"}, "delegation_required"),
-    # 판정표 원장(RK-01) — 읽기는 범위 밖 대상의 존재를 숨기고, 쓰기는 위임 신원을 먼저 본다.
-    ("risk_ledger_overview", {"target_key": "snap:s1"}, "not_visible"),
+    # 판정표 원장(RK-01) — 판정표 · 묶음 읽기는 구성원만이라(사용자 결정 11-17) 신원이 없으면 REST 와 같은 unauthorized, 쓰기는 위임 신원을 먼저 본다.
+    ("risk_ledger_overview", {"target_key": "snap:s1"}, "unauthorized"),
     ("risk_ledger_put_template", {"target_key": "snap:s1", "kind": "columns", "body": {"columns": []}}, "delegation_required"),
     ("risk_ledger_put_layer", {"target_key": "snap:s1", "name": "층", "order": 1, "rows": {"R-001": {"칸": 1}}},
      "delegation_required"),
     ("risk_ledger_build", {"target_key": "snap:s1", "layers": ["ly-1"]}, "delegation_required"),
-    ("risk_ledger_diff", {"target_key": "snap:s1", "version": 2}, "not_visible"),
-    ("risk_ledger_export", {"target_key": "snap:s1"}, "not_visible"),
+    ("risk_ledger_diff", {"target_key": "snap:s1", "version": 2}, "unauthorized"),
+    ("risk_ledger_export", {"target_key": "snap:s1"}, "unauthorized"),
     ("risk_build_evidence_bundle", {"target_key": "snap:s1", "template": {"name": "틀", "caps": {"칸": 10}, "total_cap": 10}},
      "delegation_required"),
-    ("risk_get_evidence_bundle", {"bundle_id": "eb_none"}, "not_visible"),
+    ("risk_get_evidence_bundle", {"bundle_id": "eb_none"}, "unauthorized"),
     ("risk_get_provenance", {"project_id": "p1"}, "not_visible"),
     ("risk_ledger_apply_decision", {"target_key": "snap:s1", "decision_text": "결정"}, "delegation_required"),
     ("risk_numbers_put", {"target_key": "snap:s1", "numbers": []}, "delegation_required"),
-    ("risk_numbers_check", {"target_key": "snap:s1", "text": "12.5 mm"}, "not_visible"),
-    ("risk_export_report_bundle", {"target_key": "snap:s1"}, "not_visible"),
+    ("risk_numbers_check", {"target_key": "snap:s1", "text": "12.5 mm"}, "unauthorized"),
+    ("risk_export_report_bundle", {"target_key": "snap:s1"}, "unauthorized"),
 ]
 _HANGUL = re.compile(r"[가-힣]")
 # 인자 이름에 비밀이 오면 게이트웨이·포털 절차·클라이언트 대화 기록에 값이 남는다(작업 지시서 A-11) — 포털 절차의

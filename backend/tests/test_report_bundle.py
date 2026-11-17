@@ -97,5 +97,7 @@ def test_mcp_pages_the_facts_and_logs_once_per_call(ledger_box):
     rest = call("risk_export_report_bundle", target_key=ledger_box.target_key, version=4, offset=first["next_offset"])
     assert rest["report_bundle_id"] == first["report_bundle_id"] and rest["facts"][0]["code"] != first["facts"][0]["code"]
     assert ledger_box.store.query_one("SELECT COUNT(*) AS n FROM rr_ledger_exports WHERE kind = 'report_bundle'")["n"] == 2
+    assert "codes" not in first["cite"]["scope"] and first["sources"] and rest["sources"] == [] and rest["sources_total"] == len(first["sources"])
+    assert all(f["code"] in {i["code"] for i in rest["facts"]} for f in rest["figures"])
     ledger_box.act_as(STRANGER)
-    assert call("risk_export_report_bundle", target_key=ledger_box.target_key)["error"] == "not_visible"
+    assert call("risk_export_report_bundle", target_key=ledger_box.target_key)["error"] == "E404"

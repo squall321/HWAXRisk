@@ -12,7 +12,8 @@
    `grade_changed_codes` 를 머리에 보인다. 빈 칸 앞뒤는 '(빈 칸)' 으로.
 3. **덮은 차례 보기** — 판 머리의 `layers`(이름 · 차례 · 원천 파일 · 덮은 칸 · 바뀐 칸 · 새 코드). 칸 하나의 덮인 내력이 필요하면 백엔드에
    경로를 청한다(지금은 `rr_ledger_cells` 를 읽는 REST 가 없다).
-4. **내보내기 단추** — `GET …/export?fmt=csv`(파일 받기 — 첫 줄이 보안 문구다) · `fmt=json`. 내보낼 때마다 기록이 선다는 것을 단추 곁에 적는다.
+4. **내보내기 단추** — `GET …/export?fmt=csv`(파일 받기 — 첫 줄이 보안 문구다, 수식으로 읽힐 칸은 앞에 `'` — 그 수는 `X-Formula-Guarded` 머리) ·
+   `fmt=json`. 원본 대조용 `raw=true` 는 따로 단추로(설명과 함께). 내보낼 때마다 기록이 선다는 것을 단추 곁에 적는다.
 5. **근거 묶음 만들기** — 틀(칸별 상한 · 합 상한) 입력 꼴과 `POST …/evidence-bundles` 답의 `per_field`(자수 · 잘림 · 잘린 코드 수) ·
    `masked_n` · `limits` · `label_check`. 422 `bundle_too_many_items` · `bundle_too_large` 는 `detail` 의 넘은 값과 상한을 보인다.
 6. **결정 반영 미리 보기** — `POST …/ledger/layers/from-decision` 답의 `cells`(상태별 색 — filled · empty · conflict · no_source) · `counts` ·

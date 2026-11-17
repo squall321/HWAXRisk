@@ -23,9 +23,16 @@ router = APIRouter(prefix="/api")
 
 
 # ---------------------------------------------------------------- 문
+def _refuse_purged(target: dict) -> None:
+    project = routes.get_store().query_one("SELECT status FROM rr_projects WHERE id = ?", (target["project_id"],))
+    if project is not None and project["status"] == "purged":
+        raise AppError("project_purged", "회수된 과제입니다 — 판정표 원장은 비워졌고 읽거나 고칠 수 없습니다.", 409)
+
+
 def target_owner(target_key: str, owner_sub: str) -> str:
-    """읽기 본체의 첫 줄 — 그 owner 의 대상이 아니면 404(routes._target_row 와 같은 답)."""
-    routes._target_row(target_key, owner_sub)
+    """읽기 본체의 첫 줄 — 그 owner 의 대상이 아니면 404(routes._target_row 와 같은 답), 회수된 과제의 대상이면 409 project_purged(비운 틀을 읽다 500 이
+    나지 않게 — 반대 검토 L2)."""
+    _refuse_purged(routes._target_row(target_key, owner_sub))
     return owner_sub
 
 
@@ -38,10 +45,7 @@ def writer(target_key: str, ident: identity.Identity) -> tuple[str, str]:
     """REST 쓰기 — (쓸 행의 주인, 쓴 사람). 보기는 403 role_insufficient, 남 · 없는 대상은 404 다. 회수된 과제의 대상은 409 project_purged 다(회수가
     비운 원장 글을 다시 들이지 않는다 — 다른 쓰기 경로와 같다)."""
     owner = routes._target_writer(target_key, ident)
-    target = routes._target_row(target_key, owner)
-    project = routes.get_store().query_one("SELECT status FROM rr_projects WHERE id = ?", (target["project_id"],))
-    if project is not None and project["status"] == "purged":
-        raise AppError("project_purged", "회수된 과제는 고칠 수 없습니다.", 409)
+    _refuse_purged(routes._target_row(target_key, owner))
     return owner, routes._require_user(ident)
 
 
@@ -106,21 +110,29 @@ def get_version_diff(target_key: str, version: int, base: int | None = None,
     return diff_payload(target_key, version, base, owner_sub=reader(target_key, ident))
 
 
-def export_page(target_key: str, version: int | None, fmt: str, *, owner_sub: str, offset: int = 0,
-                limit: int | None = None) -> dict:
-    """내보내기 한 쪽(기록 없이) — 표(머리 · 칸 · 코드 차례의 행)를 꼴대로 싣는다. offset · limit 은 행 쪽이다(MCP 가 와이어 상한 안에 나눈다 —
-    쪽마다 보안 문구 · 칸 머리가 앞에 선다). `body` 는 기록의 지문을 잴 글이다(내보내기 기록 — note_page)."""
+def export_table_for(target_key: str, version: int | None, *, owner_sub: str) -> dict:
+    """내보낼 표(기록 없이) — 그 owner 의 대상이 아니면 404. MCP 가 쪽을 재는 동안 표를 다시 읽지 않게 한 번 읽어 넘긴다."""
     target_owner(target_key, owner_sub)
+    return ledger.export_table(routes.get_store(), target_key, version)
+
+
+def export_page(target_key: str, version: int | None, fmt: str, *, owner_sub: str, offset: int = 0,
+                limit: int | None = None, table: dict | None = None, raw: bool = False) -> dict:
+    """내보내기 한 쪽(기록 없이) — 표(머리 · 칸 · 코드 차례의 행)를 꼴대로 싣는다. offset · limit 은 행 쪽이다(MCP 가 와이어 상한 안에 나눈다 —
+    쪽마다 보안 문구 · 칸 머리가 앞에 선다). csv 는 수식으로 읽힐 글 칸 앞에 ' 를 붙이고 그 수를 formula_guarded 에 적는다(raw 면 붙이지 않는다 —
+    반대 검토 L1)."""
     if fmt not in ledger.EXPORT_FORMATS:
         raise ledger._bad(f"fmt 는 {list(ledger.EXPORT_FORMATS)} 가운데 하나다 — {fmt!r}.")
-    table = ledger.export_table(routes.get_store(), target_key, version)
+    if table is None:
+        table = export_table_for(target_key, version, owner_sub=owner_sub)
     codes = list(table["rows"])
     start = max(0, int(offset or 0))
     page = codes[start:] if limit is None else codes[start:start + max(1, int(limit))]
     out: dict[str, Any] = {"notice": table["notice"], "target_key": target_key, "version": table["version"], "format": fmt,
                            "rows_n": len(codes), "offset": start, "page_rows": len(page)}
     if fmt == "csv":
-        out["text"] = ledger.table_csv(table, page)
+        out["text"], out["formula_guarded"] = ledger.table_csv(table, page, raw=raw)
+        out["raw"] = bool(raw)
     else:
         out["table"] = ledger.table_json(table, page)
     if start + len(page) < len(codes):
@@ -137,14 +149,15 @@ def note_page(out: dict, *, owner_sub: str, actor: str) -> dict:
 
 
 @router.get("/targets/{target_key}/ledger/versions/{version}/export")
-def get_version_export(target_key: str, version: int, fmt: str = Query("csv"),
+def get_version_export(target_key: str, version: int, fmt: str = Query("csv"), raw: bool = False,
                        ident: identity.Identity = Depends(identity.current)) -> Any:
-    """판 내보내기 — csv(첫 줄 보안 문구 · 둘째 줄 칸 머리) 또는 json(첫 칸 notice). 기록이 남는다."""
+    """판 내보내기 — csv(첫 줄 보안 문구 · 둘째 줄 칸 머리 — 수식으로 읽힐 글 칸 앞에 ' 를 붙이고 그 수를 X-Formula-Guarded 머리에, raw=true 면 원장
+    그대로) 또는 json(첫 칸 notice). 기록이 남는다."""
     owner = reader(target_key, ident)
-    out = note_page(export_page(target_key, version, fmt, owner_sub=owner), owner_sub=owner, actor=routes._require_user(ident))
+    out = note_page(export_page(target_key, version, fmt, owner_sub=owner, raw=raw), owner_sub=owner, actor=routes._require_user(ident))
     if fmt == "csv":
         return PlainTextResponse(out["text"], media_type="text/csv; charset=utf-8",
-                                 headers={"X-Export-Id": out["export_id"]})
+                                 headers={"X-Export-Id": out["export_id"], "X-Formula-Guarded": str(out["formula_guarded"])})
     return out["table"]
 
 
@@ -175,7 +188,9 @@ def bundle_payload(bundle_id: str, *, owner_sub: str) -> dict:
         raise _bundle_missing(bundle_id)
     try:
         target_owner(row["target_key"], owner_sub)
-    except AppError:
+    except AppError as exc:
+        if exc.http_status != 404:
+            raise                                   # 회수된 과제(409)는 그대로 말한다 — 남 · 없는 대상만 없는 묶음과 같은 404 다
         raise _bundle_missing(bundle_id) from None
     return evidence_bundle.payload(row)
 

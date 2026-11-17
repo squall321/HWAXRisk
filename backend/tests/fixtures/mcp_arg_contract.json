@@ -463,13 +463,14 @@
    }
   },
   "risk_ledger_export": {
-   "params": [["target_key", "POSITIONAL_OR_KEYWORD"], ["version", "POSITIONAL_OR_KEYWORD"], ["fmt", "POSITIONAL_OR_KEYWORD"], ["offset", "POSITIONAL_OR_KEYWORD"]],
+   "params": [["target_key", "POSITIONAL_OR_KEYWORD"], ["version", "POSITIONAL_OR_KEYWORD"], ["fmt", "POSITIONAL_OR_KEYWORD"], ["offset", "POSITIONAL_OR_KEYWORD"], ["raw", "POSITIONAL_OR_KEYWORD"]],
    "required": ["target_key"],
    "properties": {
     "target_key": {"title": "Target Key", "type": "string"},
     "version": {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": null, "title": "Version"},
     "fmt": {"default": "json", "title": "Fmt", "type": "string"},
-    "offset": {"default": 0, "title": "Offset", "type": "integer"}
+    "offset": {"default": 0, "title": "Offset", "type": "integer"},
+    "raw": {"default": false, "title": "Raw", "type": "boolean"}
    }
   },
   "risk_build_evidence_bundle": {

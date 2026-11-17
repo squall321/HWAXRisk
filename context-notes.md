@@ -6340,8 +6340,8 @@ L5 · L6 · L7 · L8 이고, 나머지(H1 · M1 · M2 · M6~M9 · L1~L3 · L9 ·
   각 표의 created_by · updated_by, 내보내기는 rr_ledger_exports 다.
 - LG-4 근거 묶음 색인은 자기 지문을 담을 수 없다 — 묶음의 fingerprint 는 contracts §1 식 그대로 evidence 전체, 색인에는 '본문 지문'(색인 뒤 항목)을
   싣는다. 칸 하나가 항목 하나, 칸 이름은 칸 정의의 중립 이름만(판정 낱말이 든 칸 이름은 칸 정의에서 받지 않는다), key 는 기계 이름이다.
-- LG-5 MCP 읽기 문은 다른 읽기 도구와 같은 mcp_scope_owner(소유 · 구성원 · 조직 공개)다 — contracts 의 '구성원' 은 REST 문이다. 조직 공개는 주인이
-  켠 MCP 노출이라 등록부와 같은 범위로 둔다. 근거 묶음 받기는 기본이 evidence 전부(엔진 DL-01 이 그대로 넣는다), offset 을 주면 와이어 쪽이다.
+- LG-5 (뒤집힘 — LG-13) 처음에는 MCP 읽기 문을 다른 읽기 도구와 같은 mcp_scope_owner(조직 공개 포함)로 두었다. 근거 묶음 받기는 기본이 evidence
+  전부(엔진 DL-01 이 그대로 넣는다), offset 을 주면 와이어 쪽이다.
 - LG-6 결정 반영의 job_id 길 — 11-17 엔진은 view=decision_json 을 모른다(full · summary). 도구 오류면 summary 결정문을 쪽마다 잇고 표결은 그 답의
   votes.tally(agree · conditional · oppose · abstain)를 쓴다. 한국어 표결 낱말(찬성 · 조건부 · 반대)도 같은 칸으로 모은다.
 - LG-7 provenance 는 앱이 가진 값만 — StepForge 단계 · 판, DynaForge 덱에 적힌 요소 수 · 덱 판은 앱이 부르는 도구가 내지 않아 null · unknown · needs 다.
@@ -6357,3 +6357,9 @@ L5 · L6 · L7 · L8 이고, 나머지(H1 · M1 · M2 · M6~M9 · L1~L3 · L9 ·
 - LG-12 근거 묶음은 늘 가린다 — 사용자 결정(11-17). 게이트웨이가 `heax-hwax_risk:risk_get_evidence_bundle` 을 제 가림에서 빼므로(그 가림이 묶음 글을 고쳐
   엔진의 지문 대조가 깨졌다) 이 앱이 묶음 가림의 유일한 자리다. `mask=false` 는 422 `bundle_mask_required`. 틀의 칸 차례는 [[칸, 자] …] 로 지문 · 저장에
   든다(반대 검토 M4).
+- LG-13 판정표 · 근거 묶음 · 숫자 점검 · 보고 묶음의 MCP 읽기는 구성원만이다 — 사용자 결정(11-17). REST 와 같은 문(_target_reader)과 같은 거절(신원 없음
+  401 unauthorized · 남 404 E404 — 조직 공개 과제라도)이다. 출처 표지 · 기존 읽기 도구(등록부 등)는 그대로 mcp_scope_owner 다. 이 여섯 도구는 스레드에서
+  돈다(반대 검토 L3).
+- LG-14 반대 검토 L1 · L2 · M5 — csv 는 수식으로 읽힐 글 칸 앞에 ' 를 붙인다(raw=true 는 원본 대조용). 회수는 판 보안 문구 · 숫자 원장 열쇠 · 금지값을
+  비우고, 회수된 과제의 대상은 읽기 · 쓰기 모두 409 project_purged 다. 쪽으로 나누지 않는 요약 목록은 MCP 쪽마다 앞 200개와 <칸>_total, 쪽 답의
+  cite.scope 는 코드 수만이다.

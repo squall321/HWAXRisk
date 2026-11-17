@@ -172,9 +172,11 @@ def test_mcp_returns_the_whole_evidence_by_default_and_pages_on_request(ledger_b
     assert whole["fingerprint"] == evidence_bundle.fingerprint(whole["evidence"]) and len(whole["evidence"]) == built["items_n"]
     first = call("risk_get_evidence_bundle", bundle_id=built["bundle_id"], offset=0)
     assert first["paged"] is True and first["evidence"][0] == whole["evidence"][0]
+    assert "codes" not in first["cite"]["scope"] and first["cite"]["scope"]["codes_n"] == len(whole["cite"]["scope"]["codes"])
     ledger_box.act_as(STRANGER)
-    assert call("risk_get_evidence_bundle", bundle_id=built["bundle_id"])["error"] == "not_visible"
-    assert call("risk_get_evidence_bundle", bundle_id="eb_none")["error"] == "not_visible"
+    theirs = call("risk_get_evidence_bundle", bundle_id=built["bundle_id"])
+    gone = call("risk_get_evidence_bundle", bundle_id="eb_none")
+    assert theirs["error"] == gone["error"] == "E404" and theirs["message"].replace(built["bundle_id"], "") == gone["message"].replace("eb_none", "")
 
 
 def test_every_line_breaking_character_in_a_cell_is_folded(ledger_box):

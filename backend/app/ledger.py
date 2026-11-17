@@ -502,16 +502,45 @@ def export_table(store: Any, target_key: str, version: int | None = None) -> dic
             "code_label": colset["body"].get("code_label") or "code", "columns": columns, "rows": rows}
 
 
-def table_csv(table: Mapping[str, Any], codes: Sequence[str] | None = None) -> str:
-    """CSV 글 — 첫 줄은 보안 문구(한 칸), 둘째 줄이 칸 머리(코드 칸 + 칸 정의 차례), 이어 코드 차례의 행. 빈 칸은 빈 글이다."""
+# 스프레드시트가 수식으로 읽는 글 칸의 머리(CSV 수식 주입 — 반대 검토 L1). '-' 는 뒤가 수가 아닐 때만이다(-0.3 은 값이다).
+_FORMULA_HEAD = re.compile(r"^(?:[=+@\t\r]|-(?![0-9.]))")
+
+
+def formula_guard(value: Any) -> tuple[Any, bool]:
+    """수식으로 읽힐 글 칸이면 앞에 ' 를 붙인다 — (칸, 붙였나). 수 · 참거짓 · 수 글('-12.5')은 그대로다."""
+    if isinstance(value, str) and _FORMULA_HEAD.match(value) and _number_text(value) is None:
+        return "'" + value, True
+    return value, False
+
+
+def _number_text(value: str) -> float | None:
+    try:
+        return float(value.replace(",", ""))
+    except ValueError:
+        return None
+
+
+def table_csv(table: Mapping[str, Any], codes: Sequence[str] | None = None, *, raw: bool = False) -> tuple[str, int]:
+    """CSV 글과 막은 칸 수 — 첫 줄은 보안 문구(한 칸), 둘째 줄이 칸 머리(코드 칸 + 칸 정의 차례), 이어 코드 차례의 행. 빈 칸은 빈 글이다. `raw` 가
+    아니면 수식으로 읽힐 글 칸(=, +, @, 탭 · CR 로 시작하거나 - 뒤가 수가 아닌 것) 앞에 ' 를 붙인다 — 원본 표와 바이트까지 견줄 때만 raw 다."""
     buf = io.StringIO()
     writer = csv.writer(buf, lineterminator="\n")
+    guarded = 0
+
+    def cell(value: Any) -> Any:
+        nonlocal guarded
+        if raw:
+            return value
+        value, hit = formula_guard(value)
+        guarded += hit
+        return value
+
     writer.writerow([table["notice"]])
-    writer.writerow([table["code_label"], *table["columns"]])
+    writer.writerow([cell(table["code_label"]), *(cell(c) for c in table["columns"])])
     for code in (codes if codes is not None else table["rows"]):
         cells = table["rows"][code]
-        writer.writerow([code, *("" if cells.get(c) is None else cells[c] for c in table["columns"])])
-    return buf.getvalue()
+        writer.writerow([code, *("" if cells.get(c) is None else cell(cells[c]) for c in table["columns"])])
+    return buf.getvalue(), guarded
 
 
 def table_json(table: Mapping[str, Any], codes: Sequence[str] | None = None) -> dict:
@@ -543,11 +572,16 @@ def overview(store: Any, target_key: str) -> dict:
                 for r in store.query("SELECT * FROM rr_ledger_versions WHERE target_key = ? ORDER BY version", (target_key,))]
     used = {x["layer_id"] for r in store.query("SELECT layers_json FROM rr_ledger_versions WHERE target_key = ?", (target_key,))
             for x in json.loads(r["layers_json"] or "[]")}
-    layers = [_layer_view(r) for r in store.query("SELECT * FROM rr_ledger_layers WHERE target_key = ? ORDER BY created_at, layer_order",
-                                                 (target_key,))]
-    for layer in layers:
-        layer["used"] = layer["layer_id"] in used
-        layer.pop("meta", None)
+    # 층의 행 · 칸 수는 SQLite 가 센다 — 층마다 행 글 전부를 파이썬으로 풀지 않는다(반대 검토 L3).
+    layers = [{"layer_id": r["layer_id"], "target_key": r["target_key"], "name": r["name"], "order": r["layer_order"],
+               "source_file": r["source_file"], "origin": r["origin"], "colset_version": r["colset_version"], "rows_n": r["rows_n"],
+               "cells_n": r["cells_n"], "rows_hash": r["rows_hash"], "created_by": r["created_by"], "created_at": r["created_at"],
+               "used": r["layer_id"] in used}
+              for r in store.query(
+                  "SELECT l.layer_id, l.target_key, l.name, l.layer_order, l.source_file, l.origin, l.colset_version, l.rows_hash,"
+                  " l.created_by, l.created_at, (SELECT COUNT(*) FROM json_each(l.rows_json)) AS rows_n,"
+                  " (SELECT COUNT(*) FROM json_each(l.rows_json) AS r, json_each(r.value)) AS cells_n"
+                  " FROM rr_ledger_layers l WHERE l.target_key = ? ORDER BY l.created_at, l.layer_order", (target_key,))]
     bundles = [dict(r) for r in store.query(
         "SELECT bundle_id, version, fingerprint, items_n, total_chars, masked_n, created_at FROM rr_evidence_bundles"
         " WHERE target_key = ? ORDER BY created_at, bundle_id", (target_key,))]

@@ -117,7 +117,9 @@ def test_snapshot_registry_and_provenance_tools_carry_it_over_mcp(ledger_box):
     direct = call("risk_get_provenance", project_id=project_id)
     assert _codes(direct) == ["mcad_early_stage"]
     snap = call("risk_get_snapshot", snapshot_id=snapshot_id, part="state")
-    assert snap["provenance"] == direct
+    # 와이어가 모자라면 짧은 꼴(경고 코드 · 검사 상태)이다(반대 검토 M5 — _fit_provenance).
+    shown = snap["provenance"]
+    assert shown == direct or (shown["brief"] and shown["warnings"] == _codes(direct)), shown
     reg = call("risk_get_registry", target_key=target_key)
     assert reg["provenance"]["snapshot_id"] == snapshot_id and _codes(reg["provenance"]) == ["mcad_early_stage"]
     ledger_box.act_as(STRANGER)

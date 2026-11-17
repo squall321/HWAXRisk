@@ -1986,7 +1986,7 @@ PURGE_BLANK_SQL: tuple[tuple[str, str], ...] = (
                             " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
     ("rr_ledger_layers", "UPDATE rr_ledger_layers SET name = '', source_file = NULL, rows_json = '{}', meta_json = NULL"
                          " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
-    ("rr_ledger_versions", "UPDATE rr_ledger_versions SET layers_json = '[]'"
+    ("rr_ledger_versions", "UPDATE rr_ledger_versions SET layers_json = '[]', notice = '[purged]'"
                            " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
     ("rr_ledger_rows", "UPDATE rr_ledger_rows SET cells_json = '{}'"
                        " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
@@ -1995,9 +1995,11 @@ PURGE_BLANK_SQL: tuple[tuple[str, str], ...] = (
     ("rr_evidence_bundles", f"UPDATE rr_evidence_bundles SET evidence_gz = X'{_EMPTY_PAGES_GZ.hex()}', template_json = '{{}}',"
                             " per_field_json = '{}'"
                             " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
-    ("rr_ledger_numbers", "UPDATE rr_ledger_numbers SET definition = NULL, source_file = NULL"
+    # 숫자 원장 · 금지값은 열쇠(이름 · 리비전 · 값)부터 과제 글이다 — 행은 남기고(수는 남는다) 열쇠를 행 번호로 갈아 비운다(반대 검토 L2).
+    ("rr_ledger_numbers", "UPDATE rr_ledger_numbers SET name = '[purged:' || rowid || ']', revision = '', value_text = '0', unit = NULL,"
+                          " definition = NULL, source_file = NULL, line = NULL, metric_key = NULL"
                           " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
-    ("rr_ledger_forbidden", "UPDATE rr_ledger_forbidden SET reason = '[purged]'"
+    ("rr_ledger_forbidden", "UPDATE rr_ledger_forbidden SET value_text = '[purged:' || rowid || ']', unit = NULL, reason = '[purged]'"
                             " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
 )
 

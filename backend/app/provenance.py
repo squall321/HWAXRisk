@@ -65,14 +65,26 @@ def _source_cards(store: Any, project_id: str) -> dict[str, dict]:
 
 
 def _snapshot(store: Any, project_id: str, snapshot_id: str | None) -> dict | None:
-    sql = ("SELECT s.id AS id, s.created_at AS created_at, s.ir_json AS ir_json, s.app_versions_json AS app_versions_json"
+    """스냅샷의 출처 칸만 — IR 원문(수 MB 일 수 있다)을 파이썬으로 다 풀지 않고 SQLite 가 sources · missing 만 꺼낸다. 노드는 rr_ir_nodes 에서 dyna pid ·
+    ecad board 만 읽는다(반대 검토 L3 — 스냅샷 쪽을 받을 때마다 IR 원문 전부를 다시 풀었다). 비운 원문(폐기)은 빈 IR 이다."""
+    sql = ("SELECT s.id AS id, s.created_at AS created_at, s.app_versions_json AS app_versions_json,"
+           " CASE WHEN json_valid(s.ir_json) THEN json_extract(s.ir_json, '$.sources') END AS sources_json,"
+           " CASE WHEN json_valid(s.ir_json) THEN json_extract(s.ir_json, '$.missing') END AS missing_json"
            " FROM rr_snapshots s JOIN rr_projects p ON p.id = s.project_id WHERE s.project_id = ? AND s.owner_sub = p.owner_sub")
     row = (store.query_one(sql + " AND s.id = ?", (project_id, snapshot_id)) if snapshot_id
            else store.query_one(sql + " ORDER BY s.created_at DESC, s.rowid DESC LIMIT 1", (project_id,)))
     if row is None:
         return None
-    return {"id": row["id"], "created_at": row["created_at"], "ir": _loads(row["ir_json"], {}),
-            "app_versions": _loads(row["app_versions_json"], {})}
+    sources = _loads(row["sources_json"], [])
+    ir = {"sources": sources, "missing": _loads(row["missing_json"], {})} if row["sources_json"] is not None else {}
+    nodes: list[dict] = []
+    if ir:
+        nodes = [{"domain": r["source_kind"], "kind": r["kind"], "attrs": _loads(r["attrs_json"], {}) if r["kind"] == "board" else {}}
+                 for r in store.query("SELECT kind, source_kind, attrs_json FROM rr_ir_nodes WHERE snapshot_id = ?"
+                                      " AND ((source_kind = 'dyna' AND kind = 'pid') OR (source_kind = 'ecad' AND kind = 'board'))",
+                                      (row["id"],))]
+        ir["nodes"] = nodes
+    return {"id": row["id"], "created_at": row["created_at"], "ir": ir, "app_versions": _loads(row["app_versions_json"], {})}
 
 
 def _warn(code: str, message: str, **evidence: Any) -> dict:

@@ -31,7 +31,7 @@ facts 키 · 실제 판정표는 PC 수용 때 등록하는 데이터다. 아래
 | 층 쌓기 | `risk_ledger_put_layer` | `POST …/ledger/layers` | 편집자 |
 | 판 짓기 | `risk_ledger_build` | `POST …/ledger/versions` | 편집자 |
 | 판 비교 | `risk_ledger_diff` | `GET …/ledger/versions/{v}/diff?base=` | 읽기 |
-| 내보내기 | `risk_ledger_export` | `GET …/ledger/versions/{v}/export?fmt=csv\|json` | 읽기(기록) |
+| 내보내기 | `risk_ledger_export` | `GET …/ledger/versions/{v}/export?fmt=csv\|json&raw=` | 읽기(기록) — csv 는 수식으로 읽힐 글 칸 앞에 `'`(raw=true 면 그대로) |
 | 근거 묶음 | `risk_build_evidence_bundle` · `risk_get_evidence_bundle` | `POST …/evidence-bundles` · `GET /api/evidence-bundles/{id}` | 편집자 · 읽기 |
 | 결정 반영 | `risk_ledger_apply_decision` | `POST …/ledger/layers/from-decision` | 편집자 |
 | 숫자 원장 | `risk_numbers_put` · `risk_numbers_check` | `PUT …/numbers` · `POST …/numbers/check` | 편집자 · 읽기 |
@@ -39,7 +39,8 @@ facts 키 · 실제 판정표는 PC 수용 때 등록하는 데이터다. 아래
 | 출처 표지 | `risk_get_provenance`(+ 스냅샷 · 등록부 · 단면 자리 · 길잡이 답) | `GET /api/projects/{id}/provenance` | 읽기 |
 | 표기 규칙 | `risk_taxonomy(part="labels")` | `GET /api/taxonomy/labels` | 공용 |
 
-읽기는 대상의 구성원(MCP 는 다른 읽기 도구와 같은 시야 — 소유 · 구성원 · 조직 공개), 쓰기는 편집자 이상이고 MCP 쓰기는 게이트웨이 위임 신원만이다.
+읽기는 대상의 구성원이다 — MCP 도 REST 와 같은 문 · 같은 거절이고 조직 공개로 넓히지 않는다(사용자 결정 11-17 — 출처 표지 · 기존 읽기 도구는 그대로).
+쓰기는 편집자 이상이고 MCP 쓰기는 게이트웨이 위임 신원만이다. 회수된 과제의 대상은 읽기 · 쓰기 모두 409 `project_purged` 다.
 
 ## 3. 정한 것
 
@@ -90,7 +91,7 @@ DynaForge `system_status` 의 `env` 는 이미 나온다 — 캡처가 `app_vers
    칸에 `sp_key: true`, 증거 유형 칸에 `axis: "type"`).
 2. 기준 행 층으로 첫 판을 짓는다 — `risk_ledger_build(layers=[{name: "기준 행", order: 10, rows, source_file}])`.
 3. 덮어쓰기 층 다섯을 병합 스크립트의 차례 그대로 `order` 를 주어 쌓고(앞 회차 행 → 뒤 회차 행 → 수기 수정 → 이어하기 결과 마지막) 기준 판 위에 짓는다.
-4. `risk_ledger_export(fmt="csv")` 의 셋째 줄부터를 PC 의 다음 판 csv 와 칸 단위로 견준다 — 수용 기준은 칸 차이 0 · 행 수 · 층마다 덮은 칸 수 · 등급
+4. `risk_ledger_export(fmt="csv", raw=true)` 의 셋째 줄부터를 PC 의 다음 판 csv 와 칸 단위로 견준다 — 수용 기준은 칸 차이 0 · 행 수 · 층마다 덮은 칸 수 · 등급
    바뀐 코드 수가 PC 기록과 같다는 것이다.
 5. 근거 틀(칸별 상한 · 합 상한)로 `risk_build_evidence_bundle` 을 만들고 `risk_get_evidence_bundle` 의 evidence 를 `deliberate_start(evidence=…)` 에
    넣어 본다 — `label_check.violations_n` 0, 색인의 코드 목록이 실은 행 전부인지 본다.
