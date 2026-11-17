@@ -78,18 +78,24 @@ MCP 답의 쪽 — 쪽으로 나누는 칸(판 비교의 changes · 보고 묶�
   source_version: "v<판>/c<칸 정의 판>", scope{target_key, codes}}`.
 - **출처 표지** — 앱이 가진 값만 싣는다. 환경 낱말은 게이트웨이 낱말 `dev` · `prod` · `unknown`(원래 낱말은 `env_raw`).
 
-## 4. 원천 앱이 내줘야 채워지는 칸(11-17 dev 소스 대조)
+## 4. 원천 앱이 내주는 칸 · 아직 내지 않는 칸(11-17 dev 소스 대조)
 
-| 앱 | 칸 | 지금 | 청할 것 |
+캡처가 원천 앱의 답을 얼린다 — `sources[].provenance`(rr_ir.v1 의 새 선택 칸, ir_hash 입력이 아니다)와 `app_version.extra`. 출처 표지는 얼린 값만
+읽어 라이브 호출이 없고, 그 칸을 얼리기 전의 옛 스냅샷은 `unknown` 과 까닭이다.
+
+| 앱 | 칸 | 어디서 | 출처 표지 |
 |---|---|---|---|
-| StepForge | 과제 단계 | 앱이 부르는 도구(프로젝트 상세 · 트리 · 계면 · 시스템 상태)에 없다 — `list_projects` · `what_next` 에만 | `GET /api/projects/{id}` 에 `stage` · `stage_code`(empty · files · parsed · detected · deck) |
-| StepForge | 설계 판 이름 | `get_project_meta.revision` 에만 | 같은 상세에 `revision{rev_label, rev_seq, model_key, task_code, status}` |
-| StepForge | 환경 | `system_status` 에 없다 | `env` · `instance` · `app` · `build` |
-| DynaForge | 덱에 적힌 요소 수 | `inspect_file` 의 `elements` 는 같은 id 를 덮어쓴 뒤의 고유 수다 | `elements_declared` · `duplicate_element_ids{count, top}` |
-| DynaForge | 덱 판 | 없다 | 덱 `title` · `sha256`, `report_summary` 에 `source_kfile{id, filename, sha256}` |
+| StepForge(D-706 · main 93918cf1) | 단계 `stage` · `stage_code`(empty · files · parsed · detected · deck) | 과제 상세 `GET /api/projects/{id}` | 검출 전(empty · files · parsed)이면 `mcad_early_stage` — 신호(검출 흔적 · 계면 0)보다 앞선다 |
+| StepForge | 판 `revision{decided, rev_label, rev_seq, model_key, task_code, status}` | 같은 상세 | 정한 판(decided)의 `rev_label` 이 판 대조의 MCAD 쪽이다 |
+| StepForge | 사본 단계 `copy_stage[]`(more_advanced) | 같은 상세(늘) · 읽기 MCP 답(더 진행된 사본이 있거나 이름으로 골랐을 때만) | 더 진행된 사본이 있으면 `mcad_more_advanced_copy`(파싱까지만 된 사본의 함정) |
+| StepForge | `app` · `build` · `env`(dev \| prod \| null 과 `env_why`) · `env_raw` · `instance{server, pid, host}` | `system_status` | `env` 는 게이트웨이 낱말, 모르면 `env_why` 를 까닭으로 |
+| DynaForge(KooRemapper DF-14 · c37bd03) | `meta.modelmeta.element_id_collisions` · `parts_missing` | `inspect_file` | 덱 요소 = `meta.elements` + 잃은 요소(빔은 양쪽 모두 세지 않는다), 0 보다 크면 `dyna_element_id_collisions` · `dyna_parts_missing`, 11-17 전에 올린 파일은 null → 모름 |
+| DynaForge | 덱 지문 `sha256`(답의 맨 위 칸) | `inspect_file` | 예전에는 `meta.sha256` 을 읽어 늘 비었다 — ref 에 지문이 없어도 이제 얼린다 |
+| DynaForge | `env`(development · production) | `system_status` | 캡처가 이제 부른다(선택 호출 — 실패해도 캡처는 멈추지 않는다) |
+| DynaForge | 리포트 `environment`(dev · prod · unknown) | `report_summary` | 운영이 아닌 리포트를 인용하면 `dyna_report_env_not_production` |
 
-DynaForge `system_status` 의 `env` 는 이미 나온다 — 캡처가 `app_version.extra.env` 에 남긴다. 지금 잴 수 있는 신호는 덱 파트 수 대 요소가 있는 파트
-수(요소 없는 파트 경고)와 검출 흔적 없음 · 계면 0(이른 사본 경고)이다.
+아직 내지 않는 칸(`needs`) — DynaForge 덱 판(`*TITLE` · 개정, `report_summary` 의 `source_kfile`)과 `system_status` 의 `app_key` · `instance` ·
+`build`. 그래서 MCAD 판 ≠ 덱 판 대조는 덱 쪽 값이 생길 때까지 늘 `unknown` 이다(두 쪽 다 값이 있을 때만 잰다).
 
 ## 5. PC 수용 절차(실제 판정표 대조)
 
